@@ -5,7 +5,6 @@ from PIL import Image
 
 from vllm import LLM, SamplingParams
 
-
 # Usage:
 # python3 examples/offline_inference/florence2_v1_smoke.py \
 #   --model /path/to/florence2
