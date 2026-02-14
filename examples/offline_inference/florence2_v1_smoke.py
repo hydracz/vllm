@@ -33,8 +33,11 @@ if __name__ == "__main__":
     image = Image.open(args.image).convert("RGB")
     outputs = llm.generate(
         {
-            "prompt": args.prompt,
-            "multi_modal_data": {"image": image},
+            "encoder_prompt": {
+                "prompt": args.prompt,
+                "multi_modal_data": {"image": image},
+            },
+            "decoder_prompt": "",
         },
         sampling_params=SamplingParams(
             temperature=0.0,
