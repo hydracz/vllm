@@ -11,16 +11,20 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from transformers import BatchFeature, PretrainedConfig
+from transformers.models.bart.modeling_bart import BartEncoder
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.nemotron_parse import (
+    BartDecoderLayer,
     BartParallelLMHead,
     BartScaledWordEmbedding,
-    MBartDecoderNoPos,
 )
+from vllm.model_executor.models.whisper import WhisperAttention
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
@@ -32,18 +36,26 @@ from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseProcessingInfo,
     EncDecMultiModalProcessor,
-    PromptReplacement,
+    PromptIndexTargets,
+    PromptInsertion,
     PromptUpdate,
 )
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal
-from .utils import AutoWeightsLoader
+from .utils import AutoWeightsLoader, _merge_multimodal_embeddings
+from vllm.v1.attention.backend import AttentionType
 
 
 class Florence2ImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     data: torch.Tensor
     """Shape: (batch_size, num_channel, height, width)"""
+
+
+class Florence2EncoderInputIds(TypedDict):
+    type: Literal["input_ids"]
+    data: torch.Tensor
+    """Shape: (batch_size, seq_len)"""
 
 
 # ViT implementation are all copied from
@@ -609,6 +621,132 @@ class DaViT(nn.Module):
 
 
 # Language backbone and processor implementation
+class Florence2TextEncoderLayer(nn.Module):
+    def __init__(self, config: PretrainedConfig, prefix: str = ""):
+        super().__init__()
+        del prefix
+        self.embed_dim = config.d_model
+        self.self_attn = WhisperAttention(
+            embed_dim=self.embed_dim,
+            num_heads=config.encoder_attention_heads,
+            attn_type=AttentionType.ENCODER,
+            prefix="self_attn",
+        )
+        self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
+        self.activation_fn = get_act_fn(config.activation_function)
+        self.fc1 = ColumnParallelLinear(
+            self.embed_dim,
+            config.encoder_ffn_dim,
+            bias=True,
+            prefix="fc1",
+        )
+        self.fc2 = RowParallelLinear(
+            config.encoder_ffn_dim,
+            self.embed_dim,
+            bias=True,
+            prefix="fc2",
+        )
+        self.final_layer_norm = nn.LayerNorm(self.embed_dim)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        residual = hidden_states
+        hidden_states = self.self_attn(hidden_states=hidden_states)
+        hidden_states = residual + hidden_states
+        hidden_states = self.self_attn_layer_norm(hidden_states)
+
+        residual = hidden_states
+        hidden_states, _ = self.fc1(hidden_states)
+        hidden_states = self.activation_fn(hidden_states)
+        hidden_states, _ = self.fc2(hidden_states)
+        hidden_states = residual + hidden_states
+        hidden_states = self.final_layer_norm(hidden_states)
+        return hidden_states
+
+
+class Florence2TextEncoder(nn.Module):
+    def __init__(self, config: PretrainedConfig, embed_tokens: nn.Module):
+        super().__init__()
+        self.embed_tokens = embed_tokens
+        max_positions = config.max_position_embeddings + 2
+        self.embed_positions = nn.Embedding(max_positions, config.d_model)
+        self.layernorm_embedding = nn.LayerNorm(config.d_model)
+        self.layers = nn.ModuleList(
+            [Florence2TextEncoderLayer(config, prefix=f"layers.{i}") for i in range(config.encoder_layers)]
+        )
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if inputs_embeds is None:
+            if input_ids is None:
+                raise ValueError("Either input_ids or inputs_embeds must be provided")
+            inputs_embeds = self.embed_tokens(input_ids)
+
+        batch_size, seq_len = inputs_embeds.shape[:2]
+        positions = (
+            torch.arange(seq_len, device=inputs_embeds.device)
+            .unsqueeze(0)
+            .expand(batch_size, -1)
+        )
+        hidden_states = inputs_embeds + self.embed_positions(positions + 2)
+        hidden_states = self.layernorm_embedding(hidden_states)
+        for encoder_layer in self.layers:
+            hidden_states = encoder_layer(hidden_states)
+        return hidden_states
+
+
+class Florence2BartDecoderNoPos(nn.Module):
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        cache_config: VllmConfig | None = None,
+        quant_config: VllmConfig | None = None,
+        embed_tokens: nn.Embedding | None = None,
+        prefix: str = "",
+    ):
+        super().__init__()
+        embed_scale = math.sqrt(config.d_model) if config.scale_embedding else 1.0
+        self.embed_tokens = BartScaledWordEmbedding(
+            config.vocab_size, config.d_model, embed_scale=embed_scale
+        )
+        if embed_tokens is not None:
+            self.embed_tokens.weight = embed_tokens.weight
+
+        self.layers = nn.ModuleList(
+            [
+                BartDecoderLayer(
+                    config,
+                    cache_config=cache_config,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.layers.{layer_idx}",
+                )
+                for layer_idx in range(config.decoder_layers)
+            ]
+        )
+        self.layernorm_embedding = nn.LayerNorm(config.d_model)
+
+    def forward(
+        self,
+        decoder_input_ids: torch.Tensor | None,
+        *,
+        encoder_hidden_states: torch.Tensor | None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_tokens(decoder_input_ids)
+
+        hidden_states = self.layernorm_embedding(inputs_embeds)
+        for decoder_layer in self.layers:
+            hidden_states = decoder_layer(
+                decoder_hidden_states=hidden_states,
+                encoder_hidden_states=encoder_hidden_states,
+            )
+        return hidden_states
+
+
 class Florence2LanguageModel(nn.Module):
     """Lightweight Florence2 decoder wrapper used by vLLM runtime.
 
@@ -629,14 +767,18 @@ class Florence2LanguageModel(nn.Module):
         self.vocab_size = config.vocab_size
 
         self.shared = BartScaledWordEmbedding(self.vocab_size, config.d_model)
-        self.decoder = MBartDecoderNoPos(
+        self.encoder = BartEncoder(config, embed_tokens=self.shared)
+        self.decoder_embed_positions = nn.Embedding(
+            config.max_position_embeddings + 2,
+            config.d_model,
+        )
+        self.decoder = Florence2BartDecoderNoPos(
             config,
             cache_config=cache_config,
             quant_config=quant_config,
             embed_tokens=self.shared,
             prefix=f"{prefix}.decoder",
         )
-        self.decoder.layer_norm = nn.Identity()
 
     def forward(
         self,
@@ -661,11 +803,37 @@ class Florence2LanguageModel(nn.Module):
             Model output torch.Tensor
         """
 
-        encoder_hidden_states = (
-            inputs_embeds if inputs_embeds is not None else encoder_outputs
-        )
+        if inputs_embeds is not None:
+            encoder_inputs_embeds = inputs_embeds
+            squeezed = False
+            if encoder_inputs_embeds.ndim == 2:
+                encoder_inputs_embeds = encoder_inputs_embeds.unsqueeze(0)
+                squeezed = True
+            encoder_hidden_states = self.encoder(
+                input_ids=None,
+                attention_mask=None,
+                inputs_embeds=encoder_inputs_embeds,
+                return_dict=True,
+            ).last_hidden_state
+            if squeezed:
+                encoder_hidden_states = encoder_hidden_states.squeeze(0)
+        else:
+            encoder_hidden_states = encoder_outputs
+        decoder_inputs_embeds = None
+        if input_ids is not None:
+            decoder_inputs_embeds = self.decoder.embed_tokens(input_ids)
+            pos_ids = positions.clamp(
+                min=0,
+                max=self.decoder_embed_positions.num_embeddings - 3,
+            )
+            decoder_inputs_embeds = (
+                decoder_inputs_embeds
+                + self.decoder_embed_positions(pos_ids + 2)
+            )
         decoder_outputs = self.decoder(
-            decoder_input_ids=input_ids, encoder_hidden_states=encoder_hidden_states
+            decoder_input_ids=input_ids,
+            encoder_hidden_states=encoder_hidden_states,
+            inputs_embeds=decoder_inputs_embeds,
         )
 
         return decoder_outputs
@@ -726,7 +894,7 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
         )
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.decoder.embed_tokens(input_ids)
+        return self.model.encoder.embed_tokens(input_ids)
 
     def compute_logits(
         self,
@@ -742,8 +910,7 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
         - self_attn.{q,k,v}_proj -> self_attn.qkv_proj
         - encoder_attn.{k,v}_proj -> encoder_attn.kv_proj
 
-        The decoder layer norm is intentionally treated as loaded, because the
-        runtime replaces it with Identity in this port.
+        Decoder final layer norm is replaced with Identity in this port.
         """
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -757,13 +924,13 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
             target_name = name
             shard_id = None
 
-            if ".self_attn.q_proj" in name:
+            if ".decoder.layers." in name and ".self_attn.q_proj" in name:
                 target_name = name.replace(".self_attn.q_proj", ".self_attn.qkv_proj")
                 shard_id = "q"
-            elif ".self_attn.k_proj" in name:
+            elif ".decoder.layers." in name and ".self_attn.k_proj" in name:
                 target_name = name.replace(".self_attn.k_proj", ".self_attn.qkv_proj")
                 shard_id = "k"
-            elif ".self_attn.v_proj" in name:
+            elif ".decoder.layers." in name and ".self_attn.v_proj" in name:
                 target_name = name.replace(".self_attn.v_proj", ".self_attn.qkv_proj")
                 shard_id = "v"
             elif ".encoder_attn.k_proj" in name:
@@ -771,12 +938,16 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
                     ".encoder_attn.k_proj", ".encoder_attn.kv_proj"
                 )
                 shard_id = "k"
+            elif ".decoder.embed_positions.weight" in name:
+                target_name = name.replace(
+                    ".decoder.embed_positions.weight",
+                    ".decoder_embed_positions.weight",
+                )
             elif ".encoder_attn.v_proj" in name:
                 target_name = name.replace(
                     ".encoder_attn.v_proj", ".encoder_attn.kv_proj"
                 )
                 shard_id = "v"
-
             if target_name not in params_dict:
                 continue
 
@@ -789,10 +960,6 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
 
             loaded_params.add(target_name)
-
-        loaded_params.update(
-            name for name in params_dict if ".decoder.layer_norm." in name
-        )
 
         return loaded_params
 
@@ -846,9 +1013,9 @@ class Florence2MultiModalProcessor(EncDecMultiModalProcessor[Florence2Processing
     """Florence2 encoder-decoder multimodal processor for v1.
 
     Key behavior:
-    - encoder prompt starts from a sentinel token id ([0])
-    - decoder prompt keeps user prompt tokens
-    - image placeholders are expanded to image_seq_length pseudo tokens
+    - encoder prompt carries task token prompt text (e.g. <CAPTION>)
+    - decoder prompt starts from decoder start token (eos_token_id in Florence2)
+    - image placeholders are inserted as pad-token spans on encoder side
     """
 
     def _hf_processor_applies_updates(
@@ -865,14 +1032,25 @@ class Florence2MultiModalProcessor(EncDecMultiModalProcessor[Florence2Processing
         prompt: str | list[int],
         mm_items: MultiModalDataItems,
     ) -> str | list[int]:
-        return [0]
+        return prompt
 
     def create_decoder_prompt(
         self,
         prompt: str | list[int],
         mm_items: MultiModalDataItems,
     ) -> str | list[int]:
-        return prompt
+        return [self.info.get_hf_config().eos_token_id]
+
+    def _apply_hf_processor_tokens_only(
+        self,
+        prompt_tokens: list[int],
+    ) -> list[int]:
+        hf_processor = self.info.get_hf_processor()
+        tokenizer = hf_processor.tokenizer
+        prompt_text = tokenizer.decode(prompt_tokens)
+        prompt_text = hf_processor._construct_prompts([prompt_text])[0]
+        prompt_tokens = tokenizer.encode(prompt_text, add_special_tokens=False)
+        return prompt_tokens
 
     def _call_hf_processor(
         self,
@@ -888,9 +1066,11 @@ class Florence2MultiModalProcessor(EncDecMultiModalProcessor[Florence2Processing
         else:
             hf_processor = self.info.get_hf_processor()
             tokenizer = hf_processor.tokenizer
+            prompt = hf_processor._construct_prompts([prompt])[0]
             processed_outputs = tokenizer(
-                prompt, add_special_tokens=False, return_tensors="pt"
+                prompt, add_special_tokens=True, return_tensors="pt"
             )
+        processed_outputs["encoder_input_ids"] = processed_outputs["input_ids"].clone()
         return processed_outputs
 
     def _get_mm_fields_config(
@@ -898,7 +1078,13 @@ class Florence2MultiModalProcessor(EncDecMultiModalProcessor[Florence2Processing
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return dict(pixel_values=MultiModalFieldConfig.batched("image"))
+        num_images = int(hf_inputs["pixel_values"].shape[0])
+        return dict(
+            pixel_values=MultiModalFieldConfig.batched("image"),
+            encoder_input_ids=MultiModalFieldConfig.shared(
+                "image", batch_size=num_images
+            ),
+        )
 
     def _get_prompt_updates(
         self,
@@ -906,12 +1092,15 @@ class Florence2MultiModalProcessor(EncDecMultiModalProcessor[Florence2Processing
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
+        hf_config = self.info.get_hf_config()
+        pad_token_id = hf_config.pad_token_id
         num_image_tokens = self.info.get_num_image_tokens()
+        image_tokens = [pad_token_id] * num_image_tokens
         return [
-            PromptReplacement(
+            PromptInsertion(
                 modality="image",
-                target=[0],
-                replacement=[0] * num_image_tokens,
+                target=PromptIndexTargets.start(),
+                insertion=image_tokens,
             )
         ]
 
@@ -948,6 +1137,7 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
                 vllm_config=vllm_config.with_hf_config(config.text_config),
                 prefix=f"{prefix}.language_model",
             )
+        self.pad_token_id = config.pad_token_id
 
     def _build_image_projection_layers(self, config: PretrainedConfig):
         """Initialize visual projection and positional/temporal embeddings."""
@@ -1034,6 +1224,9 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
         pixel_values: (
             list[list[torch.Tensor]] | list[torch.Tensor] | torch.Tensor | None
         ) = kwargs.pop("pixel_values", None)
+        encoder_input_ids: torch.Tensor | None = kwargs.pop(
+            "encoder_input_ids", None
+        )
         image_embeds: (
             list[list[torch.Tensor]] | list[torch.Tensor] | torch.Tensor | None
         ) = kwargs.pop("image_embeds", None)
@@ -1064,9 +1257,19 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
                         flattened_list.append(batch_items)
                 flattened_pixel_values = torch.stack(flattened_list, dim=0)
 
-            return Florence2ImagePixelInputs(
-                type="pixel_values",
-                data=self._validate_pixel_values(flattened_pixel_values),
+            return (
+                Florence2ImagePixelInputs(
+                    type="pixel_values",
+                    data=self._validate_pixel_values(flattened_pixel_values),
+                ),
+                (
+                    None
+                    if encoder_input_ids is None
+                    else Florence2EncoderInputIds(
+                        type="input_ids",
+                        data=encoder_input_ids,
+                    )
+                ),
             )
 
         if image_embeds is not None:
@@ -1140,8 +1343,43 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
-        vision_embeddings = self._process_image_input(image_input)
-        return vision_embeddings
+        parsed_image_input, encoder_input_ids = image_input
+        vision_embeddings = self._process_image_input(parsed_image_input)
+
+        if encoder_input_ids is None:
+            return vision_embeddings
+
+        encoder_ids = encoder_input_ids["data"]
+        if encoder_ids.ndim == 1:
+            encoder_ids = encoder_ids.unsqueeze(0)
+
+        num_images = vision_embeddings.shape[0]
+        if encoder_ids.shape[0] == 1 and num_images > 1:
+            encoder_ids = encoder_ids.expand(num_images, -1).contiguous()
+
+        encoder_token_embeddings = self.language_model.get_input_embeddings(encoder_ids)
+        is_image_placeholder = encoder_ids.eq(self.pad_token_id)
+        num_placeholder_tokens = int(is_image_placeholder.sum().item())
+        num_vision_tokens = int(vision_embeddings.shape[0] * vision_embeddings.shape[1])
+        if num_placeholder_tokens == num_vision_tokens and num_placeholder_tokens > 0:
+            encoder_inputs_embeds = _merge_multimodal_embeddings(
+                encoder_token_embeddings,
+                vision_embeddings,
+                is_image_placeholder,
+            )
+        else:
+            encoder_inputs_embeds = torch.cat(
+                [vision_embeddings, encoder_token_embeddings],
+                dim=1,
+            )
+
+        encoder_hidden_states = self.language_model.model.encoder(
+            input_ids=None,
+            attention_mask=None,
+            inputs_embeds=encoder_inputs_embeds,
+            return_dict=True,
+        ).last_hidden_state
+        return encoder_hidden_states
 
     def forward(
         self,
@@ -1159,7 +1397,9 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
             encoder_outputs = []
         inputs_embeds = torch.cat(encoder_outputs, dim=0) if encoder_outputs else None
         hidden_states = self.language_model(
-            input_ids, positions, encoder_outputs=inputs_embeds
+            input_ids,
+            positions,
+            encoder_outputs=inputs_embeds,
         )
         return hidden_states
 
