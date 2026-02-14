@@ -1,3 +1,4 @@
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # SPDX-License-Identifier: Apache-2.0
 
 from PIL import Image

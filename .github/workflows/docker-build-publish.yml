@@ -38,10 +38,11 @@ jobs:
       - name: Extract version
         id: meta
         run: |
-          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          ref="$GITHUB_REF"
+          if [[ "$ref" == refs/tags/* ]]; then
+            echo "version=${ref#refs/tags/}" >> "$GITHUB_OUTPUT"
           else
-            echo "version=dev-${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+            echo "version=dev-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Build and push Docker image
