@@ -672,7 +672,10 @@ class Florence2TextEncoder(nn.Module):
         self.embed_positions = nn.Embedding(max_positions, config.d_model)
         self.layernorm_embedding = nn.LayerNorm(config.d_model)
         self.layers = nn.ModuleList(
-            [Florence2TextEncoderLayer(config, prefix=f"layers.{i}") for i in range(config.encoder_layers)]
+            [
+                Florence2TextEncoderLayer(config, prefix=f"layers.{i}")
+                for i in range(config.encoder_layers)
+            ]
         )
 
     def forward(
@@ -1057,9 +1060,7 @@ class Florence2MultiModalProcessor(EncDecMultiModalProcessor[Florence2Processing
             token_id = tokenizer.convert_tokens_to_ids(token)
             if token_id is None:
                 return False
-            if unk_token_id is not None and token_id == unk_token_id:
-                return False
-            return True
+            return unk_token_id is None or token_id != unk_token_id
 
         candidates = [task_token, task_token.upper(), task_token.lower()]
         deduped_candidates = list(dict.fromkeys(candidates))

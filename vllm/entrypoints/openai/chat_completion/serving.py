@@ -186,7 +186,9 @@ class OpenAIServingChat(OpenAIServing):
                     trust_remote_code=self.model_config.trust_remote_code,
                 )
             except Exception:
-                logger.exception("Failed to initialize Florence2 processor for OD parsing")
+                logger.exception(
+                    "Failed to initialize Florence2 processor for OD parsing"
+                )
 
     async def warmup(self) -> None:
         """
@@ -1896,7 +1898,9 @@ class OpenAIServingChat(OpenAIServing):
             )
             return [None] * len(final_res.outputs)
 
-        parsed_per_choice: list[dict[str, Any] | None] = [None] * len(final_res.outputs)
+        parsed_per_choice: list[dict[str, Any] | None] = [
+            None
+        ] * len(final_res.outputs)
         for output in final_res.outputs:
             try:
                 raw_generation = self._florence2_processor.tokenizer.decode(
@@ -1911,7 +1915,8 @@ class OpenAIServingChat(OpenAIServing):
                 parsed_per_choice[output.index] = parsed
             except Exception:
                 logger.exception(
-                    "Failed to build florence2_od_parsed for choice index %s on model %s",
+                    "Failed to build florence2_od_parsed for choice index %s "
+                    "on model %s",
                     output.index,
                     model_name,
                 )
