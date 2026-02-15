@@ -41,10 +41,10 @@ from vllm.multimodal.processing import (
     PromptInsertion,
     PromptUpdate,
 )
+from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal
 from .utils import AutoWeightsLoader, _merge_multimodal_embeddings
-from vllm.v1.attention.backend import AttentionType
 
 
 class Florence2ImagePixelInputs(TypedDict):
@@ -831,8 +831,7 @@ class Florence2LanguageModel(nn.Module):
                 max=self.decoder_embed_positions.num_embeddings - 3,
             )
             decoder_inputs_embeds = (
-                decoder_inputs_embeds
-                + self.decoder_embed_positions(pos_ids + 2)
+                decoder_inputs_embeds + self.decoder_embed_positions(pos_ids + 2)
             )
         decoder_outputs = self.decoder(
             decoder_input_ids=input_ids,
@@ -1044,12 +1043,8 @@ class Florence2MultiModalProcessor(EncDecMultiModalProcessor[Florence2Processing
     ) -> str:
         hf_processor = self.info.get_hf_processor()
 
-        prompts_without_input = getattr(
-            hf_processor, "task_prompts_without_inputs", {}
-        )
-        prompts_with_input = getattr(
-            hf_processor, "task_prompts_with_input", {}
-        )
+        prompts_without_input = getattr(hf_processor, "task_prompts_without_inputs", {})
+        prompts_with_input = getattr(hf_processor, "task_prompts_with_input", {})
 
         tokenizer = getattr(hf_processor, "tokenizer", None)
         unk_token_id = getattr(tokenizer, "unk_token_id", None)
@@ -1308,9 +1303,7 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
         pixel_values: (
             list[list[torch.Tensor]] | list[torch.Tensor] | torch.Tensor | None
         ) = kwargs.pop("pixel_values", None)
-        encoder_input_ids: torch.Tensor | None = kwargs.pop(
-            "encoder_input_ids", None
-        )
+        encoder_input_ids: torch.Tensor | None = kwargs.pop("encoder_input_ids", None)
         image_embeds: (
             list[list[torch.Tensor]] | list[torch.Tensor] | torch.Tensor | None
         ) = kwargs.pop("image_embeds", None)

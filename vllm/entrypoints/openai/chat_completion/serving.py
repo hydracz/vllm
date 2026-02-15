@@ -16,8 +16,8 @@ import partial_json_parser
 import regex as re
 from fastapi import Request
 from openai_harmony import Message as OpenAIMessage
-from PIL import Image
 from partial_json_parser.core.options import Allow
+from PIL import Image
 from transformers import AutoProcessor
 
 from vllm.engine.protocol import EngineClient
@@ -1898,9 +1898,7 @@ class OpenAIServingChat(OpenAIServing):
             )
             return [None] * len(final_res.outputs)
 
-        parsed_per_choice: list[dict[str, Any] | None] = [
-            None
-        ] * len(final_res.outputs)
+        parsed_per_choice: list[dict[str, Any] | None] = [None] * len(final_res.outputs)
         for output in final_res.outputs:
             try:
                 raw_generation = self._florence2_processor.tokenizer.decode(

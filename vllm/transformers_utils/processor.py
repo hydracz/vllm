@@ -113,6 +113,7 @@ def get_processor(
     **kwargs: Any,
 ) -> _P:
     """Load a processor for the given model name via HuggingFace."""
+
     def _load_processor(load_trust_remote_code: bool):
         if isinstance(processor_cls, tuple) or processor_cls == ProcessorMixin:
             return AutoProcessor.from_pretrained(
@@ -157,9 +158,11 @@ def get_processor(
             not trust_remote_code
             and "image_token" in str(e)
             and Path(processor_name).exists()
-            and (isinstance(processor_cls, tuple)
-                 or processor_cls == ProcessorMixin
-                 or issubclass(processor_cls, ProcessorMixin))
+            and (
+                isinstance(processor_cls, tuple)
+                or processor_cls == ProcessorMixin
+                or issubclass(processor_cls, ProcessorMixin)
+            )
         )
         if can_retry:
             processor = _load_processor(True)
