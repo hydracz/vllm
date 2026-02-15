@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-import regex as re
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Literal, TypedDict
 
+import regex as re
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
