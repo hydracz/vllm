@@ -254,8 +254,6 @@ _EMBEDDING_MODELS = {
     ),
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),  # noqa: E501
-    "ColQwen3": ("colqwen3", "ColQwen3Model"),
-    "OpsColQwen3Model": ("colqwen3", "ColQwen3Model"),
     "SiglipModel": ("siglip", "SiglipEmbeddingModel"),
     # Technically Terratorch models work on images, both in
     # input and output. I am adding it here because it piggy-backs on embedding
@@ -488,6 +486,10 @@ _MULTIMODAL_MODELS = {
         "qwen2_vl",
         "Tarsier2ForConditionalGeneration",
     ),
+    "Florence2ForConditionalGeneration": (
+        "florence2",
+        "Florence2ForConditionalGeneration",
+    ),
     "UltravoxModel": ("ultravox", "UltravoxModel"),
     "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),  # noqa: E501
     "VoxtralRealtimeGeneration": ("voxtral_realtime", "VoxtralRealtimeGeneration"),  # noqa: E501
@@ -602,7 +604,6 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "BartModel": "0.10.2",
     "BartForConditionalGeneration": "0.10.2",
     "DonutForConditionalGeneration": "0.10.2",
-    "Florence2ForConditionalGeneration": "0.10.2",
     "MBartForConditionalGeneration": "0.10.2",
     "MllamaForConditionalGeneration": "0.10.2",
 }

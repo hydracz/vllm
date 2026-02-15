@@ -76,7 +76,6 @@ from vllm.multimodal.processing.processor import (
     PromptUpdateDetails,
     _seq2tokens,
 )
-from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 from vllm.transformers_utils.configs.radio import RadioConfig
@@ -1093,9 +1092,6 @@ class BaseNanoNemotronVLProcessingInfo(BaseProcessingInfo):
         **kwargs: object,
     ) -> BaseNanoNemotronVLProcessor:
         raise NotImplementedError
-
-    def get_default_tok_params(self) -> TokenizeParams:
-        return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}

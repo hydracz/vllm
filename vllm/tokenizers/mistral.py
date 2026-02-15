@@ -17,7 +17,6 @@ from mistral_common.tokens.tokenizers.sentencepiece import (
     SentencePieceTokenizer,
 )
 from mistral_common.tokens.tokenizers.tekken import Tekkenizer
-from pydantic import ValidationError
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -65,16 +64,14 @@ def maybe_serialize_tool_calls(request: "MistralChatCompletionRequest"):
     # TODO: remove when pydantic v2.11 is released
     for i, message in enumerate(request.messages):
         if message.get("role") == "assistant":
-            if (tool_calls_validator := message.get("tool_calls", None)) is not None:
+            tool_calls_validator = message.get("tool_calls", ().__iter__())
+            validated_tool_calls = []
+            while True:
                 try:
-                    validated_tool_calls = list(tool_calls_validator)
-                except ValidationError as e:
-                    raise ValueError(
-                        "Validating messages' `tool_calls` raised an error. "
-                        "Please ensure `tool_calls` are iterable of tool calls."
-                    ) from e
-            else:
-                validated_tool_calls = []
+                    tool_call = next(tool_calls_validator)  # type: ignore
+                    validated_tool_calls.append(tool_call)
+                except StopIteration:
+                    break
 
             request.messages[i]["tool_calls"] = validated_tool_calls
 
@@ -517,7 +514,7 @@ class MistralTokenizer(TokenizerLike):
             return [self.tokenizer.id_to_piece(token_id) for token_id in ids]
 
         non_skip_special_tokens_ids = {
-            self.tokenizer.get_special_token(SpecialTokens.tool_calls),
+            self.tokenizer.get_control_token(SpecialTokens.tool_calls),
         }
         if isinstance(self.instruct, InstructTokenizerV13):
             if self.instruct.BEGIN_THINK:

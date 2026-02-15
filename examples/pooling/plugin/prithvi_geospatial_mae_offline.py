@@ -391,7 +391,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
-        default="ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
+        default="christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM",
         help="Path to a checkpoint file to load from.",
     )
     parser.add_argument(

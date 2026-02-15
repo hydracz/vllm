@@ -12,6 +12,7 @@ from .data import (
     PromptType,
     SingletonInputs,
     SingletonPrompt,
+    StreamingInput,
     TextPrompt,
     TokenInputs,
     TokensPrompt,
@@ -35,4 +36,5 @@ __all__ = [
     "EncoderDecoderInputs",
     "ProcessorInputs",
     "SingletonInputs",
+    "StreamingInput",
 ]

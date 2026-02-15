@@ -529,7 +529,6 @@ class MockModelConfig:
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
     skip_tokenizer_init: bool = False
     is_encoder_decoder: bool = False
-    is_multimodal_model: bool = False
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
@@ -543,7 +542,7 @@ class MockVllmConfig:
 def _build_renderer(model_config: MockModelConfig):
     _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
 
-    return HfRenderer.from_config(
+    return HfRenderer(
         MockVllmConfig(model_config),
         tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
     )
@@ -757,8 +756,9 @@ async def test_serving_chat_mistral_token_ids_prompt_is_validated():
     mock_tokenizer = MagicMock(spec=MistralTokenizer)
     mock_renderer = MistralRenderer(
         MockVllmConfig(mock_engine.model_config),
-        tokenizer=mock_tokenizer,
+        tokenizer_kwargs={},
     )
+    mock_renderer._tokenizer = mock_tokenizer
     # Force the Mistral chat template renderer to return token IDs.
     # Choose a prompt length that is < max_model_len, but large enough that
     # adding max_tokens should exceed the model context window.
@@ -798,8 +798,9 @@ async def test_serving_chat_mistral_token_ids_prompt_too_long_is_rejected():
     mock_tokenizer = MagicMock(spec=MistralTokenizer)
     mock_renderer = MistralRenderer(
         MockVllmConfig(mock_engine.model_config),
-        tokenizer=mock_tokenizer,
+        tokenizer_kwargs={},
     )
+    mock_renderer._tokenizer = mock_tokenizer
     # prompt_token_ids length == max_model_len should be rejected for
     # completion-like requests (ChatCompletionRequest).
     mock_renderer.render_messages_async = AsyncMock(

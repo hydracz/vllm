@@ -10,6 +10,7 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages_async,
 )
 from vllm.logger import init_logger
+from vllm.tokenizers import TokenizerLike
 
 from .base import BaseRenderer
 from .inputs import DictPrompt
@@ -23,14 +24,24 @@ class TerratorchRenderer(BaseRenderer):
     @classmethod
     def from_config(
         cls,
-        config: VllmConfig,  # type: ignore[override]
+        config: VllmConfig,
         tokenizer_kwargs: dict[str, Any],
-    ) -> "TerratorchRenderer":
-        model_config = config.model_config
+    ) -> "BaseRenderer":
+        return cls(config)
+
+    def __init__(self, config: VllmConfig) -> None:
+        super().__init__(config)
+
+        model_config = self.model_config
         if not model_config.skip_tokenizer_init:
             raise ValueError("Terratorch renderer requires `skip_tokenizer_init=True`")
 
-        return cls(config, None)
+    @property
+    def tokenizer(self) -> TokenizerLike | None:
+        return None
+
+    def get_tokenizer(self) -> TokenizerLike:
+        raise ValueError("Tokenizer not available for Terratorch renderer")
 
     def render_messages(
         self,

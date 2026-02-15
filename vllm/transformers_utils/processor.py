@@ -4,6 +4,7 @@
 import importlib
 import inspect
 from functools import lru_cache
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast, get_args, get_type_hints
 
 from transformers import (
@@ -18,12 +19,9 @@ from transformers.processing_utils import ProcessorMixin
 from transformers.video_processing_utils import BaseVideoProcessor
 from typing_extensions import TypeVar
 
-from vllm.logger import init_logger
 from vllm.transformers_utils.gguf_utils import is_gguf
 from vllm.transformers_utils.utils import convert_model_repo_to_path
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
-
-logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -71,13 +69,7 @@ def _collect_dynamic_keys_from_processing_kwargs(kwargs_cls: type) -> set[str]:
     kwargs_type_annotations = get_type_hints(kwargs_cls)
     for kw_type in ("text_kwargs", "images_kwargs", "videos_kwargs", "audio_kwargs"):
         if kw_type in kwargs_type_annotations:
-            # Use __annotations__ instead of get_type_hints() to avoid
-            # NameError from unresolved forward references (e.g.
-            # PILImageResampling). We only need key names, not types.
-            kw_cls = kwargs_type_annotations[kw_type]
-            kw_annotations: dict[str, Any] = {}
-            for base in reversed(kw_cls.__mro__):
-                kw_annotations.update(getattr(base, "__annotations__", {}))
+            kw_annotations = get_type_hints(kwargs_type_annotations[kw_type])
             for kw_name in kw_annotations:
                 dynamic_kwargs.add(kw_name)
     dynamic_kwargs |= {"text_kwargs", "images_kwargs", "videos_kwargs", "audio_kwargs"}
@@ -121,29 +113,30 @@ def get_processor(
     **kwargs: Any,
 ) -> _P:
     """Load a processor for the given model name via HuggingFace."""
+    def _load_processor(load_trust_remote_code: bool):
+        if isinstance(processor_cls, tuple) or processor_cls == ProcessorMixin:
+            return AutoProcessor.from_pretrained(
+                processor_name,
+                *args,
+                revision=revision,
+                trust_remote_code=load_trust_remote_code,
+                **kwargs,
+            )
+        if issubclass(processor_cls, ProcessorMixin):
+            return processor_cls.from_pretrained(
+                processor_name,
+                *args,
+                revision=revision,
+                trust_remote_code=load_trust_remote_code,
+                **kwargs,
+            )
+        return processor_cls(*args, **kwargs)
+
     if revision is None:
         revision = "main"
     try:
         processor_name = convert_model_repo_to_path(processor_name)
-        if isinstance(processor_cls, tuple) or processor_cls == ProcessorMixin:
-            processor = AutoProcessor.from_pretrained(
-                processor_name,
-                *args,
-                revision=revision,
-                trust_remote_code=trust_remote_code,
-                **kwargs,
-            )
-        elif issubclass(processor_cls, ProcessorMixin):
-            processor = processor_cls.from_pretrained(
-                processor_name,
-                *args,
-                revision=revision,
-                trust_remote_code=trust_remote_code,
-                **kwargs,
-            )
-        else:
-            # Processors that are standalone classes unrelated to HF
-            processor = processor_cls(*args, **kwargs)
+        processor = _load_processor(trust_remote_code)
     except ValueError as e:
         # If the error pertains to the processor class not existing or not
         # currently being imported, suggest using the --trust-remote-code flag.
@@ -157,6 +150,19 @@ def get_processor(
                 "`--trust-remote-code` flag in the CLI."
             )
             raise RuntimeError(err_msg) from e
+        else:
+            raise e
+    except AttributeError as e:
+        can_retry = (
+            not trust_remote_code
+            and "image_token" in str(e)
+            and Path(processor_name).exists()
+            and (isinstance(processor_cls, tuple)
+                 or processor_cls == ProcessorMixin
+                 or issubclass(processor_cls, ProcessorMixin))
+        )
+        if can_retry:
+            processor = _load_processor(True)
         else:
             raise e
 
@@ -204,7 +210,6 @@ def get_processor_kwargs_from_processor(processor: _P) -> set[str]:
                     )
             return processor_kwargs
     except Exception:
-        logger.exception("Failed to collect processor kwargs")
         return set()
 
 

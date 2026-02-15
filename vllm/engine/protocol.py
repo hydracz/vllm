@@ -3,7 +3,6 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Iterable, Mapping
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from vllm.config import ModelConfig, VllmConfig
@@ -11,7 +10,7 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
 )
-from vllm.inputs.data import PromptType
+from vllm.inputs.data import PromptType, StreamingInput
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import IOProcessor
@@ -25,18 +24,6 @@ from vllm.v1.engine.input_processor import InputProcessor
 
 if TYPE_CHECKING:
     from vllm.v1.engine import PauseMode
-
-
-@dataclass
-class StreamingInput:
-    """Input data for a streaming generation request.
-
-    This is used with generate() to support multi-turn streaming sessions
-    where inputs are provided via an async generator.
-    """
-
-    prompt: PromptType
-    sampling_params: SamplingParams | None = None
 
 
 class EngineClient(ABC):

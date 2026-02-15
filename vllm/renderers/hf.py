@@ -585,14 +585,27 @@ def replace_vision_chunk_video_placeholder(
     return prompt_raw
 
 
-class HfRenderer(BaseRenderer[HfTokenizer]):
+class HfRenderer(BaseRenderer):
     @classmethod
-    def from_config(  # type: ignore[override]
+    def from_config(
         cls,
         config: VllmConfig,
         tokenizer_kwargs: dict[str, Any],
-    ) -> "HfRenderer":
-        model_config = config.model_config
+    ) -> "BaseRenderer":
+        return cls(config, tokenizer_kwargs)
+
+    def __init__(
+        self,
+        config: VllmConfig,
+        tokenizer_kwargs: dict[str, Any],
+    ) -> None:
+        super().__init__(config)
+
+        model_config = self.model_config
+        self.use_unified_vision_chunk = getattr(
+            model_config.hf_config, "use_unified_vision_chunk", False
+        )
+
         if model_config.skip_tokenizer_init:
             tokenizer = None
         else:
@@ -604,18 +617,18 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 ),
             )
 
-        return cls(config, tokenizer)
+        self._tokenizer = tokenizer
 
-    def __init__(
-        self,
-        config: VllmConfig,
-        tokenizer: HfTokenizer | None,
-    ) -> None:
-        super().__init__(config, tokenizer)
+    @property
+    def tokenizer(self) -> HfTokenizer | None:
+        return self._tokenizer
 
-        self.use_unified_vision_chunk = getattr(
-            config.model_config.hf_config, "use_unified_vision_chunk", False
-        )
+    def get_tokenizer(self) -> HfTokenizer:
+        tokenizer = self.tokenizer
+        if tokenizer is None:
+            raise ValueError("Tokenizer not available when `skip_tokenizer_init=True`")
+
+        return tokenizer
 
     def render_messages(
         self,
