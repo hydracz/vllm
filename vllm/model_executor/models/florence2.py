@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-import re
+import regex as re
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Literal, TypedDict
