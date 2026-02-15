@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
+import re
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Literal, TypedDict
@@ -914,6 +915,7 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
         """
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        loaded_shared_weight = False
         for name, loaded_weight in weights:
             if "final_logits_bias" in name:
                 continue
@@ -960,6 +962,20 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
 
             loaded_params.add(target_name)
+            if target_name == "model.shared.weight":
+                loaded_shared_weight = True
+
+        if self.config.tie_word_embeddings and loaded_shared_weight:
+            shared_name = "model.shared.weight"
+            lm_head_name = "lm_head.weight"
+            if shared_name in params_dict and lm_head_name in params_dict:
+                shared_weight = params_dict[shared_name]
+                lm_head_weight = params_dict[lm_head_name]
+                shared_rows = shared_weight.shape[0]
+                lm_head_weight.data[:shared_rows, :].copy_(shared_weight.data)
+                if lm_head_weight.shape[0] > shared_rows:
+                    lm_head_weight.data[shared_rows:, :].zero_()
+                loaded_params.add(lm_head_name)
 
         return loaded_params
 
@@ -1018,6 +1034,55 @@ class Florence2MultiModalProcessor(EncDecMultiModalProcessor[Florence2Processing
     - image placeholders are inserted as pad-token spans on encoder side
     """
 
+    def _resolve_task_token_case(
+        self,
+        task_token: str,
+        has_suffix_input: bool,
+    ) -> str:
+        hf_processor = self.info.get_hf_processor()
+
+        prompts_without_input = getattr(
+            hf_processor, "task_prompts_without_inputs", {}
+        )
+        prompts_with_input = getattr(
+            hf_processor, "task_prompts_with_input", {}
+        )
+
+        tokenizer = getattr(hf_processor, "tokenizer", None)
+        unk_token_id = getattr(tokenizer, "unk_token_id", None)
+
+        def _tokenizer_recognizes(token: str) -> bool:
+            if tokenizer is None:
+                return False
+            token_id = tokenizer.convert_tokens_to_ids(token)
+            if token_id is None:
+                return False
+            if unk_token_id is not None and token_id == unk_token_id:
+                return False
+            return True
+
+        candidates = [task_token, task_token.upper(), task_token.lower()]
+        deduped_candidates = list(dict.fromkeys(candidates))
+
+        if has_suffix_input:
+            for candidate in deduped_candidates:
+                if candidate in prompts_with_input:
+                    return candidate
+        else:
+            for candidate in deduped_candidates:
+                if candidate in prompts_without_input:
+                    return candidate
+
+        for candidate in deduped_candidates:
+            if (
+                candidate in prompts_with_input
+                or candidate in prompts_without_input
+                or _tokenizer_recognizes(candidate)
+            ):
+                return candidate
+
+        return task_token
+
     def _hf_processor_applies_updates(
         self,
         prompt_text: str,
@@ -1032,6 +1097,20 @@ class Florence2MultiModalProcessor(EncDecMultiModalProcessor[Florence2Processing
         prompt: str | list[int],
         mm_items: MultiModalDataItems,
     ) -> str | list[int]:
+        if isinstance(prompt, list):
+            tokenizer = self.info.get_hf_processor().tokenizer
+            prompt = tokenizer.decode(prompt)
+
+        if isinstance(prompt, str):
+            prompt = prompt.strip()
+            match = re.match(r"^(<[^<>]+>)(.*)$", prompt)
+            if match is not None:
+                task_token, suffix = match.groups()
+                resolved_task_token = self._resolve_task_token_case(
+                    task_token,
+                    has_suffix_input=bool(suffix.strip()),
+                )
+                prompt = resolved_task_token + suffix
         return prompt
 
     def create_decoder_prompt(
@@ -1054,18 +1133,22 @@ class Florence2MultiModalProcessor(EncDecMultiModalProcessor[Florence2Processing
 
     def _call_hf_processor(
         self,
-        prompt: str,
+        prompt: str | list[int],
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        hf_processor = self.info.get_hf_processor()
+        tokenizer = hf_processor.tokenizer
+
+        if isinstance(prompt, list):
+            prompt = tokenizer.decode(prompt)
+
         if mm_data:
             processed_outputs = super()._call_hf_processor(
                 prompt, mm_data, mm_kwargs, tok_kwargs
             )
         else:
-            hf_processor = self.info.get_hf_processor()
-            tokenizer = hf_processor.tokenizer
             prompt = hf_processor._construct_prompts([prompt])[0]
             processed_outputs = tokenizer(
                 prompt, add_special_tokens=True, return_tensors="pt"
